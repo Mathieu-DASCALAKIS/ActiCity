@@ -11,6 +11,11 @@ from tensorflow.keras.models import load_model
 # -------------------------------
 app = FastAPI(title="ActiCity Hybrid Recommendation API")
 
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "ActiCity API is running"}
+
+
 df = pd.read_pickle("dataframe.pkl")
 model_dl = load_model("model_dl.h5")
 
