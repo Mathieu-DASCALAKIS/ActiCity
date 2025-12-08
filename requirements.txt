@@ -1,11 +1,9 @@
 fastapi
-uvicorn
+uvicorn[standard]
+pydantic
 pandas
-numpy
-scikit-learn
-tensorflow-cpu
-torch
-transformers
+numpy==1.26.4
 sentence-transformers
-geopy
-onnxruntime-cpu==1.17.0
+onnxruntime==1.18.0
+scikit-learn
+tensorflow-cpu==2.17.0
