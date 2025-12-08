@@ -20,7 +20,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 
 # -----------------------------
-# 2) Catégories FR ↔ EN
+# 2) Categories FR ↔ EN
 # -----------------------------
 translations = {
     "nature": "Nature",
@@ -41,92 +41,85 @@ translations_inv = {v: k for k, v in translations.items()}
 
 
 # -----------------------------
-# 3) Prédiction DL (ONNX)
+# 3) DL Prediction (ONNX)
 # -----------------------------
 def predict_categories_dl(text, embedder, model_dl, threshold=0.5):
-    # Embedding du texte
     vec = embedder.encode([text], convert_to_numpy=True).astype(np.float32)
 
-    # Prédiction ONNX
-    probs = model_dl.run(None, {"input": vec})[0][0]  # vecteur probas
+    input_name = model_dl.get_inputs()[0].name
+    probs = model_dl.run(None, {input_name: vec})[0][0]
 
     results = []
-    for i, (cat, prob) in enumerate(zip(translations.keys(), probs)):
+    for cat, prob in zip(translations.keys(), probs):
         if prob >= threshold:
             results.append((cat, float(prob)))
 
-    # Si aucune catégorie détectée → garder la top-1
-    if len(results) == 0:
-        best_idx = np.argmax(probs)
-        best_cat = list(translations.keys())[best_idx]
-        results = [(best_cat, float(probs[best_idx]))]
+    # fallback : top-1
+    if not results:
+        idx = np.argmax(probs)
+        best_cat = list(translations.keys())[idx]
+        results = [(best_cat, float(probs[idx]))]
 
     return results
 
 
 # -----------------------------
-# 4) Modèle Hybride
+# 4) Hybrid recommendation
 # -----------------------------
 def recommend_hybrid(
-    user_text,
+    text,
     user_lat,
     user_lon,
     df,
-    embedder,
-    model_dl,
-    threshold=0.5,
+    ml_pred,
+    dl_pred,
     w_cat=0.5,
     w_quality=0.3,
     w_geo=0.2,
     top_k=5
 ):
-    # ------ DL Prediction ------
-    predicted = predict_categories_dl(user_text, embedder, model_dl, threshold)
-    predicted_dict = {cat: prob for cat, prob in predicted}
+    # ML returns a vector of probs (one per POI or per label depending on training)
+    # DL returns category probs
 
-    predicted_cats = list(predicted_dict.keys())
+    dl_dict = {cat: float(prob) for cat, prob in zip(translations.keys(), dl_pred)}
 
-    # ------ Filtrage des POI par catégorie ------
+    # Determine categories selected by DL
+    predicted_cats = [cat for cat, prob in dl_dict.items() if prob >= 0.5]
+    if not predicted_cats:
+        predicted_cats = [max(dl_dict, key=dl_dict.get)]
+
+    # Filter dataset by matching categories
     mask = df[predicted_cats].sum(axis=1) >= 1
     subset = df[mask].copy()
-
     if subset.empty:
-        return pd.DataFrame([])
+        return []
 
-    # ------ Distance / Score géographique ------
+    # Distance score
     subset["distance_km"] = subset.apply(
-        lambda row: haversine_distance(
-            user_lat, user_lon, row["lat"], row["lng"]
-        ),
-        axis=1
+        lambda row: haversine_distance(user_lat, user_lon, row["lat"], row["lng"]),
+        axis=1,
     )
 
     max_dist = subset["distance_km"].max()
     subset["geo_score"] = 1 - (subset["distance_km"] / max_dist)
 
-    # ------ Score Catégorie DL ------
-    def category_score(row):
-        score = 0.0
-        for cat, prob in predicted_dict.items():
-            if row.get(cat, 0) == 1:
-                score += prob
-        return score
+    # DL category score
+    def score_dl(row):
+        return sum(dl_dict.get(cat, 0) for cat in predicted_cats if row.get(cat, 0) == 1)
 
-    subset["cat_score"] = subset.apply(category_score, axis=1)
+    subset["cat_score"] = subset.apply(score_dl, axis=1)
 
-    # ------ Score ML déjà présent dans df ("quality_ml") ------
-    if "quality_ml" in subset.columns:
-        subset["quality_score"] = subset["quality_ml"]
-    else:
-        subset["quality_score"] = 0.5  # fallback
+    # ML score (already computed outside)
+    subset["quality_score"] = ml_pred[: len(subset)]
 
-    # ------ Score Final ------
+    # Final score
     subset["final_score"] = (
         w_cat * subset["cat_score"]
         + w_quality * subset["quality_score"]
         + w_geo * subset["geo_score"]
     )
 
+    # Columns to return
     cols = [
         "name", "address", "main_category",
         "distance_km", "cat_score",
@@ -135,4 +128,4 @@ def recommend_hybrid(
 
     cols = [c for c in cols if c in subset.columns]
 
-    return subset.sort_values("final_score", ascending=False).head(top_k)[cols]
+    return subset.sort_values("final_score", ascending=False).head(top_k)[cols].to_dict(orient="records")
